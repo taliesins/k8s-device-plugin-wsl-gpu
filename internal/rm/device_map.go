@@ -19,9 +19,10 @@ package rm
 import (
 	"fmt"
 
+	"github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
+	"github.com/NVIDIA/go-nvlib/pkg/nvml"
+
 	spec "github.com/NVIDIA/k8s-device-plugin/api/config/v1"
-	"gitlab.com/nvidia/cloud-native/go-nvlib/pkg/nvlib/device"
-	"gitlab.com/nvidia/cloud-native/go-nvlib/pkg/nvml"
 )
 
 type deviceMapBuilder struct {
@@ -93,7 +94,7 @@ func (b *deviceMapBuilder) buildDeviceMapFromConfigResources() (DeviceMap, error
 func (b *deviceMapBuilder) buildGPUDeviceMap() (DeviceMap, error) {
 	devices := make(DeviceMap)
 
-	b.VisitDevices(func(i int, gpu device.Device) error {
+	err := b.VisitDevices(func(i int, gpu device.Device) error {
 		name, ret := gpu.GetName()
 		if ret != nvml.SUCCESS {
 			return fmt.Errorf("error getting product name for GPU: %v", ret)
@@ -113,7 +114,7 @@ func (b *deviceMapBuilder) buildGPUDeviceMap() (DeviceMap, error) {
 		}
 		return fmt.Errorf("GPU name '%v' does not match any resource patterns", name)
 	})
-	return devices, nil
+	return devices, err
 }
 
 // buildMigDeviceMap builds a map of resource names to MIG devices
@@ -157,7 +158,7 @@ func (b *deviceMapBuilder) assertAllMigDevicesAreValid(uniform bool) error {
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("At least one device with migEnabled=true was not configured correctly: %v", err)
+		return fmt.Errorf("at least one device with migEnabled=true was not configured correctly: %v", err)
 	}
 
 	if !uniform {
@@ -280,7 +281,8 @@ func updateDeviceMapWithReplicas(config *spec.Config, oDevices DeviceMap) (Devic
 	}
 
 	// Walk TimeSlicing.Resources and update devices in the device map as appropriate.
-	for _, r := range config.Sharing.TimeSlicing.Resources {
+	for _, resource := range config.Sharing.TimeSlicing.Resources {
+		r := resource
 		// Get the IDs of the devices we want to replicate from oDevices
 		ids, err := oDevices.getIDsOfDevicesToReplicate(&r)
 		if err != nil {

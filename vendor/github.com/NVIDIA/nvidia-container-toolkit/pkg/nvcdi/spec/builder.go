@@ -18,9 +18,12 @@ package spec
 
 import (
 	"fmt"
+	"os"
 
-	"github.com/container-orchestrated-devices/container-device-interface/pkg/cdi"
-	"github.com/container-orchestrated-devices/container-device-interface/specs-go"
+	"github.com/NVIDIA/nvidia-container-toolkit/pkg/nvcdi/transform"
+	"tags.cncf.io/container-device-interface/pkg/cdi"
+	"tags.cncf.io/container-device-interface/pkg/parser"
+	"tags.cncf.io/container-device-interface/specs-go"
 )
 
 type builder struct {
@@ -31,6 +34,10 @@ type builder struct {
 	deviceSpecs []specs.Device
 	edits       specs.ContainerEdits
 	format      string
+
+	mergedDeviceOptions []transform.MergedDeviceOption
+	noSimplify          bool
+	permissions         os.FileMode
 }
 
 // newBuilder creates a new spec builder with the supplied options
@@ -39,6 +46,13 @@ func newBuilder(opts ...Option) *builder {
 	for _, opt := range opts {
 		opt(s)
 	}
+	if s.raw != nil {
+		s.noSimplify = true
+		vendor, class := parser.ParseQualifier(s.raw.Kind)
+		s.vendor = vendor
+		s.class = class
+	}
+
 	if s.version == "" {
 		s.version = DetectMinimumVersion
 	}
@@ -51,14 +65,15 @@ func newBuilder(opts ...Option) *builder {
 	if s.format == "" {
 		s.format = FormatYAML
 	}
-
+	if s.permissions == 0 {
+		s.permissions = 0600
+	}
 	return s
 }
 
 // Build builds a CDI spec form the spec builder.
 func (o *builder) Build() (*spec, error) {
 	raw := o.raw
-
 	if raw == nil {
 		raw = &specs.Spec{
 			Version:        o.version,
@@ -71,14 +86,32 @@ func (o *builder) Build() (*spec, error) {
 	if raw.Version == DetectMinimumVersion {
 		minVersion, err := cdi.MinimumRequiredVersion(raw)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get minumum required CDI spec version: %v", err)
+			return nil, fmt.Errorf("failed to get minimum required CDI spec version: %v", err)
 		}
 		raw.Version = minVersion
 	}
 
+	if !o.noSimplify {
+		err := transform.NewSimplifier().Transform(raw)
+		if err != nil {
+			return nil, fmt.Errorf("failed to simplify spec: %v", err)
+		}
+	}
+
+	if len(o.mergedDeviceOptions) > 0 {
+		merge, err := transform.NewMergedDevice(o.mergedDeviceOptions...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create merged device transformer: %v", err)
+		}
+		if err := merge.Transform(raw); err != nil {
+			return nil, fmt.Errorf("failed to merge devices: %v", err)
+		}
+	}
+
 	s := spec{
-		Spec:   raw,
-		format: o.format,
+		Spec:        raw,
+		format:      o.format,
+		permissions: o.permissions,
 	}
 
 	return &s, nil
@@ -126,5 +159,33 @@ func WithClass(class string) Option {
 func WithFormat(format string) Option {
 	return func(o *builder) {
 		o.format = format
+	}
+}
+
+// WithNoSimplify sets whether the spec must be simplified
+func WithNoSimplify(noSimplify bool) Option {
+	return func(o *builder) {
+		o.noSimplify = noSimplify
+	}
+}
+
+// WithRawSpec sets the raw spec for the spec builder
+func WithRawSpec(raw *specs.Spec) Option {
+	return func(o *builder) {
+		o.raw = raw
+	}
+}
+
+// WithPermissions sets the permissions for the generated spec file
+func WithPermissions(permissions os.FileMode) Option {
+	return func(o *builder) {
+		o.permissions = permissions
+	}
+}
+
+// WithMergedDeviceOptions sets the options for generating a merged device.
+func WithMergedDeviceOptions(opts ...transform.MergedDeviceOption) Option {
+	return func(o *builder) {
+		o.mergedDeviceOptions = opts
 	}
 }

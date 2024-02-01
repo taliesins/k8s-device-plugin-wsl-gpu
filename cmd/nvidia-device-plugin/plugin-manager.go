@@ -19,10 +19,11 @@ package main
 import (
 	"fmt"
 
+	"github.com/NVIDIA/go-nvlib/pkg/nvml"
+
 	spec "github.com/NVIDIA/k8s-device-plugin/api/config/v1"
 	"github.com/NVIDIA/k8s-device-plugin/internal/cdi"
 	"github.com/NVIDIA/k8s-device-plugin/internal/plugin/manager"
-	"gitlab.com/nvidia/cloud-native/go-nvlib/pkg/nvml"
 )
 
 // NewPluginManager creates an NVML-based plugin manager
@@ -38,9 +39,16 @@ func NewPluginManager(config *spec.Config) (manager.Interface, error) {
 
 	nvmllib := nvml.New()
 
+	deviceListStrategies, err := spec.NewDeviceListStrategies(*config.Flags.Plugin.DeviceListStrategy)
+	if err != nil {
+		return nil, fmt.Errorf("invalid device list strategy: %v", err)
+	}
+
+	cdiEnabled := deviceListStrategies.IsCDIEnabled()
+
 	cdiHandler, err := cdi.New(
-		cdi.WithEnabled(*config.Flags.Plugin.CDIEnabled),
-		cdi.WithDriverRoot(*config.Flags.Plugin.DriverRootCtrPath),
+		cdi.WithEnabled(cdiEnabled),
+		cdi.WithDriverRoot(*config.Flags.Plugin.ContainerDriverRoot),
 		cdi.WithTargetDriverRoot(*config.Flags.NvidiaDriverRoot),
 		cdi.WithNvidiaCTKPath(*config.Flags.Plugin.NvidiaCTKPath),
 		cdi.WithNvml(nvmllib),
@@ -55,7 +63,7 @@ func NewPluginManager(config *spec.Config) (manager.Interface, error) {
 
 	m, err := manager.New(
 		manager.WithNVML(nvmllib),
-		manager.WithCDIEnabled(*config.Flags.Plugin.CDIEnabled),
+		manager.WithCDIEnabled(cdiEnabled),
 		manager.WithCDIHandler(cdiHandler),
 		manager.WithConfig(config),
 		manager.WithFailOnInitError(*config.Flags.FailOnInitError),

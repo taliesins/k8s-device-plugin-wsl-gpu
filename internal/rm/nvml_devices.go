@@ -23,7 +23,8 @@ import (
 	"strconv"
 	"strings"
 
-	"gitlab.com/nvidia/cloud-native/go-nvlib/pkg/nvml"
+	"github.com/NVIDIA/go-nvlib/pkg/nvlib/info"
+	"github.com/NVIDIA/go-nvlib/pkg/nvml"
 
 	"github.com/NVIDIA/k8s-device-plugin/internal/mig"
 )
@@ -44,8 +45,14 @@ type nvmlMigDevice nvmlDevice
 var _ deviceInfo = (*nvmlDevice)(nil)
 var _ deviceInfo = (*nvmlMigDevice)(nil)
 
-func newGPUDevice(i int, gpu nvml.Device) (string, nvmlDevice) {
-	return fmt.Sprintf("%v", i), nvmlDevice{gpu}
+func newGPUDevice(i int, gpu nvml.Device) (string, deviceInfo) {
+	index := fmt.Sprintf("%v", i)
+	isWsl, _ := info.New().HasDXCore()
+	if isWsl {
+		return index, wslDevice{gpu}
+	}
+
+	return index, nvmlDevice{gpu}
 }
 
 func newMigDevice(i int, j int, mig nvml.Device) (string, nvmlMigDevice) {

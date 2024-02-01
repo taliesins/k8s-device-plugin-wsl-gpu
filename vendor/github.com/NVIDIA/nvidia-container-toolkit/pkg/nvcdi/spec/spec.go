@@ -22,13 +22,14 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/container-orchestrated-devices/container-device-interface/pkg/cdi"
-	"github.com/container-orchestrated-devices/container-device-interface/specs-go"
+	"tags.cncf.io/container-device-interface/pkg/cdi"
+	"tags.cncf.io/container-device-interface/specs-go"
 )
 
 type spec struct {
 	*specs.Spec
-	format string
+	format      string
+	permissions os.FileMode
 }
 
 var _ Interface = (*spec)(nil)
@@ -51,7 +52,15 @@ func (s *spec) Save(path string) error {
 		cdi.WithSpecDirs(specDir),
 	)
 
-	return registry.SpecDB().WriteSpec(s.Raw(), filepath.Base(path))
+	if err := registry.SpecDB().WriteSpec(s.Raw(), filepath.Base(path)); err != nil {
+		return fmt.Errorf("failed to write spec: %w", err)
+	}
+
+	if err := os.Chmod(path, s.permissions); err != nil {
+		return fmt.Errorf("failed to set permissions on spec file: %w", err)
+	}
+
+	return nil
 }
 
 // WriteTo writes the spec to the specified writer.

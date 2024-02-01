@@ -17,6 +17,7 @@
 package plugin
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -25,14 +26,16 @@ import (
 	"strings"
 	"time"
 
+	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
+
 	spec "github.com/NVIDIA/k8s-device-plugin/api/config/v1"
 	"github.com/NVIDIA/k8s-device-plugin/internal/cdi"
 	"github.com/NVIDIA/k8s-device-plugin/internal/rm"
-	cdiapi "github.com/container-orchestrated-devices/container-device-interface/pkg/cdi"
 
 	"github.com/google/uuid"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"k8s.io/klog/v2"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
@@ -46,13 +49,15 @@ const (
 
 // NvidiaDevicePlugin implements the Kubernetes device plugin API
 type NvidiaDevicePlugin struct {
-	rm               rm.ResourceManager
-	config           *spec.Config
-	deviceListEnvvar string
-	socket           string
+	rm                   rm.ResourceManager
+	config               *spec.Config
+	deviceListEnvvar     string
+	deviceListStrategies spec.DeviceListStrategies
+	socket               string
 
-	cdiHandler cdi.Interface
-	cdiEnabled bool
+	cdiHandler          cdi.Interface
+	cdiEnabled          bool
+	cdiAnnotationPrefix string
 
 	server *grpc.Server
 	health chan *rm.Device
@@ -63,13 +68,17 @@ type NvidiaDevicePlugin struct {
 func NewNvidiaDevicePlugin(config *spec.Config, resourceManager rm.ResourceManager, cdiHandler cdi.Interface, cdiEnabled bool) *NvidiaDevicePlugin {
 	_, name := resourceManager.Resource().Split()
 
+	deviceListStrategies, _ := spec.NewDeviceListStrategies(*config.Flags.Plugin.DeviceListStrategy)
+
 	return &NvidiaDevicePlugin{
-		rm:               resourceManager,
-		config:           config,
-		deviceListEnvvar: "NVIDIA_VISIBLE_DEVICES",
-		socket:           pluginapi.DevicePluginPath + "nvidia-" + name + ".sock",
-		cdiHandler:       cdiHandler,
-		cdiEnabled:       cdiEnabled,
+		rm:                   resourceManager,
+		config:               config,
+		deviceListEnvvar:     "NVIDIA_VISIBLE_DEVICES",
+		deviceListStrategies: deviceListStrategies,
+		socket:               pluginapi.DevicePluginPath + "nvidia-" + name + ".sock",
+		cdiHandler:           cdiHandler,
+		cdiEnabled:           cdiEnabled,
+		cdiAnnotationPrefix:  *config.Flags.Plugin.CDIAnnotationPrefix,
 
 		// These will be reinitialized every
 		// time the plugin server is restarted.
@@ -113,8 +122,7 @@ func (plugin *NvidiaDevicePlugin) Start() error {
 	err = plugin.Register()
 	if err != nil {
 		klog.Infof("Could not register device plugin: %s", err)
-		plugin.Stop()
-		return err
+		return errors.Join(err, plugin.Stop())
 	}
 	klog.Infof("Registered device plugin for '%s' with Kubelet", plugin.rm.Resource())
 
@@ -227,7 +235,9 @@ func (plugin *NvidiaDevicePlugin) GetDevicePluginOptions(context.Context, *plugi
 
 // ListAndWatch lists devices and update that list according to the health status
 func (plugin *NvidiaDevicePlugin) ListAndWatch(e *pluginapi.Empty, s pluginapi.DevicePlugin_ListAndWatchServer) error {
-	s.Send(&pluginapi.ListAndWatchResponse{Devices: plugin.apiDevices()})
+	if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: plugin.apiDevices()}); err != nil {
+		return err
+	}
 
 	for {
 		select {
@@ -237,7 +247,9 @@ func (plugin *NvidiaDevicePlugin) ListAndWatch(e *pluginapi.Empty, s pluginapi.D
 			// FIXME: there is no way to recover from the Unhealthy state.
 			d.Health = pluginapi.Unhealthy
 			klog.Infof("'%s' device marked unhealthy: %s", plugin.rm.Resource(), d.ID)
-			s.Send(&pluginapi.ListAndWatchResponse{Devices: plugin.apiDevices()})
+			if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: plugin.apiDevices()}); err != nil {
+				return nil
+			}
 		}
 	}
 }
@@ -278,23 +290,29 @@ func (plugin *NvidiaDevicePlugin) Allocate(ctx context.Context, reqs *pluginapi.
 			}
 		}
 
-		response := plugin.getAllocateResponse(req.DevicesIDs)
+		response, err := plugin.getAllocateResponse(req.DevicesIDs)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get allocate response: %v", err)
+		}
 		responses.ContainerResponses = append(responses.ContainerResponses, response)
 	}
 
 	return &responses, nil
 }
 
-func (plugin *NvidiaDevicePlugin) getAllocateResponse(requestIds []string) *pluginapi.ContainerAllocateResponse {
+func (plugin *NvidiaDevicePlugin) getAllocateResponse(requestIds []string) (*pluginapi.ContainerAllocateResponse, error) {
 	deviceIDs := plugin.deviceIDsFromAnnotatedDeviceIDs(requestIds)
 
 	responseID := uuid.New().String()
-	response := plugin.getAllocateResponseForCDI(responseID, deviceIDs)
+	response, err := plugin.getAllocateResponseForCDI(responseID, deviceIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get allocate response for CDI: %v", err)
+	}
 
-	if *plugin.config.Flags.Plugin.DeviceListStrategy == spec.DeviceListStrategyEnvvar {
+	if plugin.deviceListStrategies.Includes(spec.DeviceListStrategyEnvvar) {
 		response.Envs = plugin.apiEnvs(plugin.deviceListEnvvar, deviceIDs)
 	}
-	if *plugin.config.Flags.Plugin.DeviceListStrategy == spec.DeviceListStrategyVolumeMounts {
+	if plugin.deviceListStrategies.Includes(spec.DeviceListStrategyVolumeMounts) {
 		response.Envs = plugin.apiEnvs(plugin.deviceListEnvvar, []string{deviceListAsVolumeMountsContainerPathRoot})
 		response.Mounts = plugin.apiMounts(deviceIDs)
 	}
@@ -308,16 +326,16 @@ func (plugin *NvidiaDevicePlugin) getAllocateResponse(requestIds []string) *plug
 		response.Envs["NVIDIA_MOFED"] = "enabled"
 	}
 
-	return &response
+	return &response, nil
 }
 
 // getAllocateResponseForCDI returns the allocate response for the specified device IDs.
 // This response contains the annotations required to trigger CDI injection in the container engine or nvidia-container-runtime.
-func (plugin *NvidiaDevicePlugin) getAllocateResponseForCDI(responseID string, deviceIDs []string) pluginapi.ContainerAllocateResponse {
+func (plugin *NvidiaDevicePlugin) getAllocateResponseForCDI(responseID string, deviceIDs []string) (pluginapi.ContainerAllocateResponse, error) {
 	response := pluginapi.ContainerAllocateResponse{}
 
 	if !plugin.cdiEnabled {
-		return response
+		return response, nil
 	}
 
 	var devices []string
@@ -332,15 +350,39 @@ func (plugin *NvidiaDevicePlugin) getAllocateResponseForCDI(responseID string, d
 		devices = append(devices, plugin.cdiHandler.QualifiedName("mofed", "all"))
 	}
 
-	if len(devices) > 0 {
-		var err error
-		response.Annotations, err = cdiapi.UpdateAnnotations(map[string]string{}, "nvidia-device-plugin", responseID, devices)
-		if err != nil {
-			klog.Errorf("Failed to add CDI annotations: %v", err)
-		}
+	if len(devices) == 0 {
+		return response, nil
 	}
 
-	return response
+	if plugin.deviceListStrategies.Includes(spec.DeviceListStrategyCDIAnnotations) {
+		annotations, err := plugin.getCDIDeviceAnnotations(responseID, devices)
+		if err != nil {
+			return response, err
+		}
+		response.Annotations = annotations
+	}
+
+	return response, nil
+}
+
+func (plugin *NvidiaDevicePlugin) getCDIDeviceAnnotations(id string, devices []string) (map[string]string, error) {
+	annotations, err := cdiapi.UpdateAnnotations(map[string]string{}, "nvidia-device-plugin", id, devices)
+	if err != nil {
+		return nil, fmt.Errorf("failed to add CDI annotations: %v", err)
+	}
+
+	if plugin.cdiAnnotationPrefix == spec.DefaultCDIAnnotationPrefix {
+		return annotations, nil
+	}
+
+	// update annotations if a custom CDI prefix is configured
+	updatedAnnotations := make(map[string]string)
+	for k, v := range annotations {
+		newKey := plugin.cdiAnnotationPrefix + strings.TrimPrefix(k, spec.DefaultCDIAnnotationPrefix)
+		updatedAnnotations[newKey] = v
+	}
+
+	return updatedAnnotations, nil
 }
 
 // PreStartContainer is unimplemented for this plugin
@@ -350,13 +392,17 @@ func (plugin *NvidiaDevicePlugin) PreStartContainer(context.Context, *pluginapi.
 
 // dial establishes the gRPC communication with the registered device plugin.
 func (plugin *NvidiaDevicePlugin) dial(unixSocketPath string, timeout time.Duration) (*grpc.ClientConn, error) {
-	c, err := grpc.Dial(unixSocketPath, grpc.WithInsecure(), grpc.WithBlock(),
-		grpc.WithTimeout(timeout),
+	ctx, cancel := context.WithTimeout(context.TODO(), timeout)
+	defer cancel()
+	c, err := grpc.DialContext(ctx, unixSocketPath,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
+		// TODO: We need to switch to grpc.WithContextDialer.
+		//nolint:staticcheck
 		grpc.WithDialer(func(addr string, timeout time.Duration) (net.Conn, error) {
 			return net.DialTimeout("unix", addr, timeout)
 		}),
 	)
-
 	if err != nil {
 		return nil, err
 	}

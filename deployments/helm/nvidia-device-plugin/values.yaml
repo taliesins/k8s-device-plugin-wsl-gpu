@@ -27,7 +27,6 @@ config:
   # List of fallback strategies to attempt if no config is selected and no default is provided
   fallbackStrategies: ["named" , "single"]
 
-legacyDaemonsetAPI: null
 compatWithCPUManager: null
 migStrategy: null
 failOnInitError: null
@@ -60,7 +59,28 @@ securityContext: {}
 
 resources: {}
 nodeSelector: {}
-affinity: {}
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+      - matchExpressions:
+        # On discrete-GPU based systems NFD adds the following label where 10de is the NVIDIA PCI vendor ID
+        - key: feature.node.kubernetes.io/pci-10de.present
+          operator: In
+          values:
+          - "true"
+      - matchExpressions:
+        # On some Tegra-based systems NFD detects the CPU vendor ID as NVIDIA
+        - key: feature.node.kubernetes.io/cpu-model.vendor_id
+          operator: In
+          values:
+          - "NVIDIA"
+      - matchExpressions:
+        # We allow a GPU deployment to be forced by setting the following label to "true"
+        - key: "nvidia.com/gpu.present"
+          operator: In
+          values:
+          - "true"
 tolerations:
   # This toleration is deprecated. Kept here for backward compatibility
   # See https://kubernetes.io/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/
@@ -78,15 +98,31 @@ priorityClassName: "system-node-critical"
 
 runtimeClassName: null
 
-# Subcharts
+devicePlugin:
+  enabled: true
+
+gfd:
+  enabled: false
+  nameOverride: gpu-feature-discovery
+  namespaceOverride: ""
+  noTimestamp: null
+  sleepInterval: null
+  securityContext:
+    # privileged access is required for the gpu-feature-discovery to access the
+    # vgpu info on a host.
+    # TODO: This should be optional and detected automatically.
+    privileged: true
+
+# Helm dependency
 nfd:
   nameOverride: node-feature-discovery
   enableNodeFeatureApi: false
   master:
-    extraLabelNs:
-      - nvidia.com
     serviceAccount:
       name: node-feature-discovery
+      create: true
+    config:
+      extraLabelNs: ["nvidia.com"]
 
   worker:
     tolerations:
@@ -109,7 +145,3 @@ nfd:
           - "0302"
           deviceLabelFields:
           - vendor
-gfd:
-  enabled: false
-  nameOverride: gpu-feature-discovery
-  namespaceOverride: ""

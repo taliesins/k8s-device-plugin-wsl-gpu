@@ -18,20 +18,22 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"syscall"
 	"time"
 
-	spec "github.com/NVIDIA/k8s-device-plugin/api/config/v1"
-	"github.com/NVIDIA/k8s-device-plugin/internal/info"
-	"github.com/NVIDIA/k8s-device-plugin/internal/plugin"
-	"github.com/NVIDIA/k8s-device-plugin/internal/rm"
 	"github.com/fsnotify/fsnotify"
-	cli "github.com/urfave/cli/v2"
-
+	"github.com/urfave/cli/v2"
 	"k8s.io/klog/v2"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
+
+	spec "github.com/NVIDIA/k8s-device-plugin/api/config/v1"
+	"github.com/NVIDIA/k8s-device-plugin/internal/info"
+	"github.com/NVIDIA/k8s-device-plugin/internal/logger"
+	"github.com/NVIDIA/k8s-device-plugin/internal/plugin"
+	"github.com/NVIDIA/k8s-device-plugin/internal/rm"
 )
 
 func main() {
@@ -70,10 +72,10 @@ func main() {
 			Usage:   "pass the list of DeviceSpecs to the kubelet on Allocate()",
 			EnvVars: []string{"PASS_DEVICE_SPECS"},
 		},
-		&cli.StringFlag{
+		&cli.StringSliceFlag{
 			Name:    "device-list-strategy",
-			Value:   spec.DeviceListStrategyEnvvar,
-			Usage:   "the desired strategy for passing the device list to the underlying runtime:\n\t\t[envvar | volume-mounts]",
+			Value:   cli.NewStringSlice(string(spec.DeviceListStrategyEnvvar)),
+			Usage:   "the desired strategy for passing the device list to the underlying runtime:\n\t\t[envvar | volume-mounts | cdi-annotations]",
 			EnvVars: []string{"DEVICE_LIST_STRATEGY"},
 		},
 		&cli.StringFlag{
@@ -98,11 +100,11 @@ func main() {
 			Destination: &configFile,
 			EnvVars:     []string{"CONFIG_FILE"},
 		},
-		&cli.BoolFlag{
-			Name:    "cdi-enabled",
-			Value:   false,
-			Usage:   "enable the generation of a CDI specification; use CDI annotations when passing the device list to the underlying runtime",
-			EnvVars: []string{"CDI_ENABLED"},
+		&cli.StringFlag{
+			Name:    "cdi-annotation-prefix",
+			Value:   spec.DefaultCDIAnnotationPrefix,
+			Usage:   "the prefix to use for CDI container annotation keys",
+			EnvVars: []string{"CDI_ANNOTATION_PREFIX"},
 		},
 		&cli.StringFlag{
 			Name:    "nvidia-ctk-path",
@@ -111,10 +113,10 @@ func main() {
 			EnvVars: []string{"NVIDIA_CTK_PATH"},
 		},
 		&cli.StringFlag{
-			Name:    "driver-root-ctr-path",
-			Value:   spec.DefaultDriverRootCtrPath,
+			Name:    "container-driver-root",
+			Value:   spec.DefaultContainerDriverRoot,
 			Usage:   "the path where the NVIDIA driver root is mounted in the container; used for generating CDI specifications",
-			EnvVars: []string{"DRIVER_ROOT_CTR_PATH"},
+			EnvVars: []string{"CONTAINER_DRIVER_ROOT"},
 		},
 	}
 
@@ -126,12 +128,9 @@ func main() {
 }
 
 func validateFlags(config *spec.Config) error {
-	allowedDeviceListStrategy := map[string]bool{
-		spec.DeviceListStrategyEnvvar:       true,
-		spec.DeviceListStrategyVolumeMounts: true,
-	}
-	if !allowedDeviceListStrategy[*config.Flags.Plugin.DeviceListStrategy] {
-		return fmt.Errorf("invalid --device-list-strategy option: %v", *config.Flags.Plugin.DeviceListStrategy)
+	_, err := spec.NewDeviceListStrategies(*config.Flags.Plugin.DeviceListStrategy)
+	if err != nil {
+		return fmt.Errorf("invalid --device-list-strategy option: %v", err)
 	}
 
 	if *config.Flags.Plugin.DeviceIDStrategy != spec.DeviceIDStrategyUUID && *config.Flags.Plugin.DeviceIDStrategy != spec.DeviceIDStrategyIndex {
@@ -193,7 +192,7 @@ restart:
 	// some messages, trigger a restart of the plugins, or exit the program.
 	for {
 		select {
-		// If the restart timout has expired, then restart the plugins
+		// If the restart timeout has expired, then restart the plugins
 		case <-restartTimeout:
 			goto restart
 
@@ -239,7 +238,7 @@ func startPlugins(c *cli.Context, flags []cli.Flag, restarting bool) ([]plugin.I
 	if err != nil {
 		return nil, false, fmt.Errorf("unable to load config: %v", err)
 	}
-	disableResourceRenamingInConfig(config)
+	spec.DisableResourceNamingInConfig(logger.ToKlog, config)
 
 	// Update the configuration file with default resources.
 	klog.Info("Updating config with default resource matching patterns.")
@@ -256,7 +255,7 @@ func startPlugins(c *cli.Context, flags []cli.Flag, restarting bool) ([]plugin.I
 	klog.Infof("\nRunning with config:\n%v", string(configJSON))
 
 	// Get the set of plugins.
-	klog.Info("Retreiving plugins.")
+	klog.Info("Retrieving plugins.")
 	pluginManager, err := NewPluginManager(config)
 	if err != nil {
 		return nil, false, fmt.Errorf("error creating plugin manager: %v", err)
@@ -278,9 +277,7 @@ func startPlugins(c *cli.Context, flags []cli.Flag, restarting bool) ([]plugin.I
 
 		// Start the gRPC server for plugin p and connect it with the kubelet.
 		if err := p.Start(); err != nil {
-			klog.Error("Could not contact Kubelet. Did you enable the device plugin feature gate?")
-			klog.Error("You can check the prerequisites at: https://github.com/NVIDIA/k8s-device-plugin#prerequisites")
-			klog.Error("You can learn how to set the runtime at: https://github.com/NVIDIA/k8s-device-plugin#quick-start")
+			klog.Errorf("Failed to start plugin: %v", err)
 			return plugins, true, nil
 		}
 		started++
@@ -295,46 +292,9 @@ func startPlugins(c *cli.Context, flags []cli.Flag, restarting bool) ([]plugin.I
 
 func stopPlugins(plugins []plugin.Interface) error {
 	klog.Info("Stopping plugins.")
+	var errs error
 	for _, p := range plugins {
-		p.Stop()
+		errs = errors.Join(errs, p.Stop())
 	}
-	return nil
-}
-
-// disableResourceRenamingInConfig temporarily disable the resource renaming feature of the plugin.
-// We plan to reeenable this feature in a future release.
-func disableResourceRenamingInConfig(config *spec.Config) {
-	// Disable resource renaming through config.Resource
-	if len(config.Resources.GPUs) > 0 || len(config.Resources.MIGs) > 0 {
-		klog.Infof("Customizing the 'resources' field is not yet supported in the config. Ignoring...")
-	}
-	config.Resources.GPUs = nil
-	config.Resources.MIGs = nil
-
-	// Disable renaming / device selection in Sharing.TimeSlicing.Resources
-	renameByDefault := config.Sharing.TimeSlicing.RenameByDefault
-	setsNonDefaultRename := false
-	setsDevices := false
-	for i, r := range config.Sharing.TimeSlicing.Resources {
-		if !renameByDefault && r.Rename != "" {
-			setsNonDefaultRename = true
-			config.Sharing.TimeSlicing.Resources[i].Rename = ""
-		}
-		if renameByDefault && r.Rename != r.Name.DefaultSharedRename() {
-			setsNonDefaultRename = true
-			config.Sharing.TimeSlicing.Resources[i].Rename = r.Name.DefaultSharedRename()
-		}
-		if !r.Devices.All {
-			setsDevices = true
-			config.Sharing.TimeSlicing.Resources[i].Devices.All = true
-			config.Sharing.TimeSlicing.Resources[i].Devices.Count = 0
-			config.Sharing.TimeSlicing.Resources[i].Devices.List = nil
-		}
-	}
-	if setsNonDefaultRename {
-		klog.Warning("Setting the 'rename' field in sharing.timeSlicing.resources is not yet supported in the config. Ignoring...")
-	}
-	if setsDevices {
-		klog.Warning("Customizing the 'devices' field in sharing.timeSlicing.resources is not yet supported in the config. Ignoring...")
-	}
+	return errs
 }

@@ -12,14 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-MODULE := github.com/NVIDIA/k8s-device-plugin
+DRIVER_NAME := k8s-device-plugin
+MODULE := github.com/NVIDIA/$(DRIVER_NAME)
 
-VERSION  ?= v0.13.0
+REGISTRY ?= nvcr.io/nvidia
+
+VERSION  ?= v0.14.4
 
 # vVERSION represents the version with a guaranteed v-prefix
 vVERSION := v$(VERSION:v%=%)
 
-CUDA_VERSION ?= 12.1.0
-GOLANG_VERSION ?= 1.20.1
+CUDA_VERSION ?= 12.3.0
+GOLANG_VERSION ?= 1.20.5
+
+BUILDIMAGE_TAG ?= devel-go$(GOLANG_VERSION)
+BUILDIMAGE ?=  ghcr.io/nvidia/k8s-test-infra:$(BUILDIMAGE_TAG)
 
 GIT_COMMIT ?= $(shell git describe --match="" --dirty --long --always --abbrev=40 2> /dev/null || echo "")

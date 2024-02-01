@@ -20,12 +20,13 @@ import (
 	"fmt"
 	"path/filepath"
 
+	nvdevice "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
+	"github.com/NVIDIA/go-nvlib/pkg/nvml"
 	"github.com/NVIDIA/nvidia-container-toolkit/pkg/nvcdi"
 	"github.com/NVIDIA/nvidia-container-toolkit/pkg/nvcdi/transform"
-	cdiapi "github.com/container-orchestrated-devices/container-device-interface/pkg/cdi"
 	"github.com/sirupsen/logrus"
-	nvdevice "gitlab.com/nvidia/cloud-native/go-nvlib/pkg/nvlib/device"
-	"gitlab.com/nvidia/cloud-native/go-nvlib/pkg/nvml"
+	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
+	cdiparser "tags.cncf.io/container-device-interface/pkg/parser"
 )
 
 const (
@@ -40,7 +41,6 @@ type cdiHandler struct {
 	driverRoot       string
 	targetDriverRoot string
 	nvidiaCTKPath    string
-	cdiRoot          string
 	vendor           string
 	deviceIDStrategy string
 
@@ -90,7 +90,7 @@ func newHandler(opts ...Option) (Interface, error) {
 
 	c.cdilibs = make(map[string]nvcdi.Interface)
 
-	c.cdilibs["gpu"] = nvcdi.New(
+	c.cdilibs["gpu"], err = nvcdi.New(
 		nvcdi.WithLogger(c.logger),
 		nvcdi.WithNvmlLib(c.nvml),
 		nvcdi.WithDeviceLib(c.nvdevice),
@@ -100,6 +100,9 @@ func newHandler(opts ...Option) (Interface, error) {
 		nvcdi.WithVendor(c.vendor),
 		nvcdi.WithClass("gpu"),
 	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create nvcdi library: %v", err)
+	}
 
 	var additionalModes []string
 	if c.gdsEnabled {
@@ -110,13 +113,16 @@ func newHandler(opts ...Option) (Interface, error) {
 	}
 
 	for _, mode := range additionalModes {
-		lib := nvcdi.New(
+		lib, err := nvcdi.New(
 			nvcdi.WithLogger(c.logger),
 			nvcdi.WithNVIDIACTKPath(c.nvidiaCTKPath),
 			nvcdi.WithDriverRoot(c.driverRoot),
 			nvcdi.WithVendor(c.vendor),
 			nvcdi.WithMode(mode),
 		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create nvcdi library: %v", err)
+		}
 		c.cdilibs[mode] = lib
 	}
 
@@ -133,7 +139,9 @@ func (cdi *cdiHandler) CreateSpecFile() error {
 			if ret != nvml.SUCCESS {
 				return fmt.Errorf("failed to initialize NVML: %v", ret)
 			}
-			defer cdi.nvml.Shutdown()
+			defer func() {
+				_ = cdi.nvml.Shutdown()
+			}()
 		}
 
 		spec, err := cdilib.GetSpec()
@@ -163,5 +171,5 @@ func (cdi *cdiHandler) CreateSpecFile() error {
 // QualifiedName constructs a CDI qualified device name for the specified resources.
 // Note: This assumes that the specified id matches the device name returned by the naming strategy.
 func (cdi *cdiHandler) QualifiedName(class string, id string) string {
-	return cdiapi.QualifiedName(cdi.vendor, class, id)
+	return cdiparser.QualifiedName(cdi.vendor, class, id)
 }

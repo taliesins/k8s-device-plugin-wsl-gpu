@@ -19,8 +19,8 @@ package manager
 import (
 	"fmt"
 
-	"gitlab.com/nvidia/cloud-native/go-nvlib/pkg/nvlib/info"
-	"gitlab.com/nvidia/cloud-native/go-nvlib/pkg/nvml"
+	"github.com/NVIDIA/go-nvlib/pkg/nvlib/info"
+	"github.com/NVIDIA/go-nvlib/pkg/nvml"
 	"k8s.io/klog/v2"
 
 	spec "github.com/NVIDIA/k8s-device-plugin/api/config/v1"
@@ -85,7 +85,9 @@ func New(opts ...Option) (Interface, error) {
 			klog.Warningf("nvml init failed: %v", ret)
 			return &null{}, nil
 		}
-		defer m.nvmllib.Shutdown()
+		defer func() {
+			_ = m.nvmllib.Shutdown()
+		}()
 
 		return (*nvmlmanager)(m), nil
 	case "tegra":

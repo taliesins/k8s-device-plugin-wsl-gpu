@@ -1,6 +1,7 @@
 /nvidia-device-plugin
 /releases
-
+deployments/helm/gpu-feature-discovery
+*.tgz
 .vscode
 /cmd/nvidia-device-plugin/nvidia-device-plugin
 
