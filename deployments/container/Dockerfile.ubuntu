@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG GOLANG_VERSION=1.20.5
+ARG GOLANG_VERSION=1.21.6
 ARG CUDA_IMAGE=cuda
-ARG CUDA_VERSION=12.2.0
-ARG BASE_DIST=ubuntu20.04
+ARG CUDA_VERSION=12.3.1
+ARG BASE_DIST=ubuntu22.04
 FROM nvidia/cuda:${CUDA_VERSION}-base-${BASE_DIST} as build
 
 RUN apt-get update && \
@@ -23,7 +23,7 @@ RUN apt-get update && \
     && \
     rm -rf /var/lib/apt/lists/*
 
-ARG GOLANG_VERSION=1.20.5
+ARG GOLANG_VERSION=1.21.6
 RUN set -eux; \
     \
     arch="$(uname -m)"; \
