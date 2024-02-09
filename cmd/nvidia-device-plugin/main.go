@@ -34,6 +34,7 @@ import (
 	"github.com/NVIDIA/k8s-device-plugin/internal/logger"
 	"github.com/NVIDIA/k8s-device-plugin/internal/plugin"
 	"github.com/NVIDIA/k8s-device-plugin/internal/rm"
+	"github.com/NVIDIA/k8s-device-plugin/internal/watch"
 )
 
 func main() {
@@ -136,6 +137,27 @@ func validateFlags(config *spec.Config) error {
 	if *config.Flags.Plugin.DeviceIDStrategy != spec.DeviceIDStrategyUUID && *config.Flags.Plugin.DeviceIDStrategy != spec.DeviceIDStrategyIndex {
 		return fmt.Errorf("invalid --device-id-strategy option: %v", *config.Flags.Plugin.DeviceIDStrategy)
 	}
+
+	if config.Sharing.SharingStrategy() == spec.SharingStrategyMPS {
+		if *config.Flags.MigStrategy == spec.MigStrategyMixed {
+			return fmt.Errorf("using --mig-strategy=mixed is not supported with MPS")
+		}
+
+		deviceListStrategies, err := spec.NewDeviceListStrategies(*config.Flags.Plugin.DeviceListStrategy)
+		if err != nil {
+			return err
+		}
+		if !deviceListStrategies.IsCDIEnabled() {
+			return fmt.Errorf("using MPS requires CDI")
+		}
+		if deviceListStrategies.Includes(spec.DeviceListStrategyEnvvar) {
+			return fmt.Errorf("using MPS is incompatible with --device-list-strategy=" + spec.DeviceListStrategyEnvvar)
+		}
+		if deviceListStrategies.Includes(spec.DeviceListStrategyVolumeMounts) {
+			return fmt.Errorf("using MPS is incompatible with --device-list-strategy=" + spec.DeviceListStrategyVolumeMounts)
+		}
+	}
+
 	return nil
 }
 
@@ -154,21 +176,21 @@ func loadConfig(c *cli.Context, flags []cli.Flag) (*spec.Config, error) {
 
 func start(c *cli.Context, flags []cli.Flag) error {
 	klog.Info("Starting FS watcher.")
-	watcher, err := newFSWatcher(pluginapi.DevicePluginPath)
+	watcher, err := watch.Files(pluginapi.DevicePluginPath)
 	if err != nil {
-		return fmt.Errorf("failed to create FS watcher: %v", err)
+		return fmt.Errorf("failed to create FS watcher for %s: %v", pluginapi.DevicePluginPath, err)
 	}
 	defer watcher.Close()
 
 	klog.Info("Starting OS watcher.")
-	sigs := newOSWatcher(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	sigs := watch.Signals(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
-	var restarting bool
+	var started bool
 	var restartTimeout <-chan time.Time
 	var plugins []plugin.Interface
 restart:
 	// If we are restarting, stop plugins from previous run.
-	if restarting {
+	if started {
 		err := stopPlugins(plugins)
 		if err != nil {
 			return fmt.Errorf("error stopping plugins from previous run: %v", err)
@@ -176,17 +198,16 @@ restart:
 	}
 
 	klog.Info("Starting Plugins.")
-	plugins, restartPlugins, err := startPlugins(c, flags, restarting)
+	plugins, restartPlugins, err := startPlugins(c, flags)
 	if err != nil {
 		return fmt.Errorf("error starting plugins: %v", err)
 	}
+	started = true
 
 	if restartPlugins {
 		klog.Infof("Failed to start one or more plugins. Retrying in 30s...")
 		restartTimeout = time.After(30 * time.Second)
 	}
-
-	restarting = true
 
 	// Start an infinite loop, waiting for several indicators to either log
 	// some messages, trigger a restart of the plugins, or exit the program.
@@ -231,7 +252,7 @@ exit:
 	return nil
 }
 
-func startPlugins(c *cli.Context, flags []cli.Flag, restarting bool) ([]plugin.Interface, bool, error) {
+func startPlugins(c *cli.Context, flags []cli.Flag) ([]plugin.Interface, bool, error) {
 	// Load the configuration file
 	klog.Info("Loading configuration.")
 	config, err := loadConfig(c, flags)
