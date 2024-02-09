@@ -170,7 +170,7 @@
 - Ignore Xid=13 (Graphics Engine Exception) critical errors in device health-check
 - Ignore Xid=68 (Video processor exception) critical errors in device health-check
 - Build multi-arch container images for linux/amd64 and linux/arm64
-- Use Ubuntu 20.04 for Ubuntu-based container images
+- Use Ubuntu 22.04 for Ubuntu-based container images
 - Remove Centos7 images
 
 ### Version v0.9.0

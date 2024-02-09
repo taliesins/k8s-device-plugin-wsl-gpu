@@ -55,7 +55,7 @@ implementations of Sum64.
 | 4 KB       | 11.7 GB/s | 16.7 GB/s |
 | 10 MB      | 12.0 GB/s | 17.3 GB/s |
 
-These numbers were generated on Ubuntu 20.04 with an Intel Xeon Platinum 8252C
+These numbers were generated on Ubuntu 22.04 with an Intel Xeon Platinum 8252C
 CPU using the following commands under Go 1.19.2:
 
 ```
