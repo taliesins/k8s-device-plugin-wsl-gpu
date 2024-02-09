@@ -76,13 +76,13 @@ func (d nvmlMigDevice) GetUUID() (string, error) {
 // GetPaths returns the paths for a GPU device
 func (d nvmlDevice) GetPaths() ([]string, error) {
 	path := ""
-	if _, err := os.Stat("/dev/dxg"); os.IsNotExist(err){
+	if _, err := os.Stat("/dev/dxg"); os.IsNotExist(err) {
 		minor, ret := d.GetMinorNumber()
 		if ret != nvml.SUCCESS {
 			return nil, fmt.Errorf("error getting GPU device minor number: %v", ret)
 		}
 		path = fmt.Sprintf("/dev/nvidia%d", minor)
-	
+
 	} else {
 		path = "/dev/dxg"
 	}
