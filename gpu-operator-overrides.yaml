@@ -1,0 +1,82 @@
+runtimeClassName: "nvidia"
+
+validator:
+  enabled: true
+  driver:
+    env:
+    - name: DISABLE_DEV_CHAR_SYMLINK_CREATION
+      value: "true"
+  #image: gpu-operator-validator
+  #repository: eadem
+  version: v23.9.1-ubi8
+
+operator:
+  cleanupCRD: true
+  upgradeCRD: true
+  defaultRuntime: containerd
+  version: v23.9.1-ubi8
+
+driver:
+  enabled: true
+
+toolkit:
+  enabled: true
+  env:
+    - name: CONTAINERD_CONFIG
+      value: "/var/snap/microk8s/current/args/containerd-template.toml"
+    - name: CONTAINERD_SOCKET
+      value: "/var/snap/microk8s/common/run/containerd.sock"
+    - name: CONTAINERD_RUNTIME_CLASS
+      value: "nvidia"
+    - name: CONTAINERD_SET_AS_DEFAULT
+      value: "true"
+  #image: container-toolkit
+  #repository: eadem
+  version: v1.15.0-rc.3-ubuntu20.04
+
+devicePlugin:
+  enabled: true 
+  image: k8s-device-plugin
+  repository: ghcr.io/taliesins
+  version: "5ba7865b-ubuntu22.04"
+  env:
+    - name: PASS_DEVICE_SPECS
+      value: 'true'
+    - name: FAIL_ON_INIT_ERROR
+      value: 'true'
+    - name: DEVICE_LIST_STRATEGY
+      value: envvar
+    - name: DEVICE_ID_STRATEGY
+      value: uuid
+    - name: NVIDIA_VISIBLE_DEVICES
+      value: all
+    - name: NVIDIA_DRIVER_CAPABILITIES
+      value: all
+  config:
+    create: true
+    name: device-plugin-config
+    default: k8s
+    data:
+      k8s: |-
+        version: v1
+        flags:
+          migStrategy: none
+        sharing:
+          timeSlicing:
+            renameByDefault: false
+            failRequestsGreaterThanOne: false
+            resources:
+              - name: nvidia.com/gpu
+                replicas: 1
+
+cdi:
+  enabled: true
+  
+gfd:
+  enabled: true
+
+daemonsets:
+  tolerations:
+  - effect: NoSchedule
+    key: nvidia.com/gpu
+    operator: Exists
